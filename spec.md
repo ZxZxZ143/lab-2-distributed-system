@@ -1,45 +1,50 @@
-# Lab 2 — спецификация исправленной реализации
+# Lab 2 — Revised Implementation Specification
 
-## Назначение и границы
-Локальная асинхронная обработка текстовых заданий. HTTP API принимает задание, отдельный worker преобразует сообщение в верхний регистр. SQLite хранит очередь, результат и статус. API и worker — разные процессы на одном компьютере с одним файлом базы. Python 3.9+, стандартная библиотека; AWS/SQS и внешние зависимости не используются.
+## Purpose and scope
 
-## Контракт
-| Запрос | Вход | Выход / код |
+Local asynchronous processing of text jobs. The HTTP API accepts a job, and a separate worker converts its message to uppercase. SQLite stores the queue, result and status. The API and worker are separate processes on one computer using one database file. Python 3.9+ and its standard library are required; AWS/SQS and external runtime dependencies are not used.
+
+## API contract
+
+| Request | Input | Response / status |
 |---|---|---|
-| GET /time | нет | 200, server_time: строка UTC ISO 8601 |
-| POST /echo | объект с message | 200, message: исходная строка |
-| POST /jobs | объект с message | 202, job_id: UUID-строка, status: queued; Location: /jobs/{job_id} |
-| GET /jobs/{job_id} | UUID в пути | 200, job_id, status, attempts: целое, result: null или объект с message |
-| GET /jobs/{неизвестный-id} | неизвестный ID | 404, error |
+| GET /time | None | 200, server_time: UTC ISO 8601 string |
+| POST /echo | Object containing message | 200, message: original string |
+| POST /jobs | Object containing message | 202, job_id: UUID string, status: queued; Location: /jobs/{job_id} |
+| GET /jobs/{job_id} | UUID in the path | 200, job_id, status, attempts: integer, result: null or an object containing message |
+| GET /jobs/{unknown-id} | Unknown ID | 404, error |
 
-message — непустая после strip строка, максимум 1000 символов; исходные пробелы сохраняются. Необязательные дополнительные поля игнорируются. JSON должен быть объектом; неверный JSON, тип или message дают 400. Тело ограничено 65536 байтами (413 при превышении). Неизвестный маршрут — 404. Старый /queue/orders заменён контрактом /jobs.
+message must be a string that is non-empty after stripping whitespace and contains at most 1000 characters; original whitespace is preserved. Additional fields are ignored. The JSON body must be an object; invalid JSON, types or message values produce HTTP 400. The body is limited to 65536 bytes (413 if exceeded). Unknown routes return 404. The former /queue/orders interface is replaced by /jobs.
 
-## Очередь и подтверждение
-Запись: seq (возрастающий порядок), job_id (уникальный UUID), payload (JSON с message), status, result, lease_until (Unix timestamp), token (UUID текущей выдачи), attempts (счётчик выдач). Состояния: queued -> processing -> done. Просроченное processing можно повторно выдать с новым token.
+## Queue and acknowledgement
 
-Выдача выполняется транзакцией BEGIN IMMEDIATE: выбирается самая ранняя доступная запись и резервируется на 30 секунд. Запись не удаляется. Подтверждение принимается только для действующего token до истечения lease. done фиксируется вместе с результатом. Обработка занимает 3 секунды, ожидание пустой очереди — 1 секунду. При сбое worker другой запуск сможет забрать задание после окончания lease.
+Each record contains seq (increasing order), job_id (unique UUID), payload (JSON containing message), status, result, lease_until (Unix timestamp), token (UUID for the current claim) and attempts (claim counter). States: queued -> processing -> done. An expired processing job can be claimed again with a new token.
 
-FIFO относится к порядку выдачи доступных заданий. Несколько worker могут завершать задания в другом порядке. Семантика — повторная обработка возможна (at-least-once при перезапусках worker); exactly-once для внешних действий не обещается. Преобразование текста детерминировано и не имеет внешних побочных эффектов.
+A BEGIN IMMEDIATE transaction selects the earliest available record and leases it for 30 seconds. The record is not deleted. Acknowledgement is accepted only for the current token before lease expiry. The result and done state are committed together. Processing takes three seconds; the worker waits one second when the queue is empty. After a worker failure, a restarted worker can claim the job after its lease expires.
 
-## Ограничения, допущения и риски
-| Допущение / ограничение | Последствие и мера |
+FIFO applies to the claim order of available jobs. Multiple workers may finish jobs in a different order. Repeated processing is possible (at-least-once processing when workers restart); exactly-once external effects are not promised. The text transformation is deterministic and has no external side effects.
+
+## Constraints, assumptions and risks
+
+| Assumption / constraint | Consequence and mitigation |
 |---|---|
-| Один компьютер, один путь SQLite | Разные пути создадут независимые очереди; запускать из одного каталога или передавать одинаковый --db |
-| Локальная файловая система исправна | Перезапуск не удаляет данные; удаление/повреждение файла ведёт к потере; резервное копирование вне задания |
-| Обработка короче 30 секунд | Долгая обработка теряет lease; token блокирует устаревший ack; для долгих задач нужен heartbeat |
-| Возможна повторная обработка | Внешние платежи/письма потребуют идемпотентности по job_id |
-| Нет авторизации/TLS | API привязан к 127.0.0.1; не публиковать в интернет |
-| Один SQLite writer | Подходит для учебной нагрузки, не для распределённого кластера; ожидание блокировки ограничено 10 секундами |
-| Нет удаления done-записей | База растёт; политика очистки вне текущего прототипа |
-| Нет бесконечного ожидания клиента | Producer прекращает опрос через 60 секунд, само задание остаётся в базе |
+| One computer and one SQLite path | Different paths create independent queues; run from the same directory or pass the same --db path |
+| Healthy local filesystem | Ordinary process restarts retain data; file deletion or corruption causes loss; backup is outside this assignment |
+| Processing takes less than 30 seconds | Long processing loses its lease; tokens reject stale acknowledgements; longer tasks need a heartbeat |
+| Processing may repeat | External payments or emails require idempotency keyed by job_id |
+| No authentication or TLS | The API binds to 127.0.0.1; do not expose it publicly |
+| One SQLite writer | Suitable for an educational workload, not a distributed cluster; lock waiting is limited to ten seconds |
+| Completed records are retained | The database grows; a cleanup policy is outside this prototype |
+| Client polling has a deadline | The producer stops polling after 60 seconds; the job remains stored |
 
-## Проверяемые требования и прослеживаемость
-| Требование | Реализация | Проверка |
+## Verifiable requirements and traceability
+
+| Requirement | Implementation | Verification |
 |---|---|---|
-| 202, job_id, queued и done | api.py, broker.py, consumer.py | test_http_workflow_and_validation |
-| Ошибки 400/404/413 | api.py | test_http_workflow_and_validation |
-| FIFO, ack после обработки | JobStore.claim/complete | test_fifo_and_ack |
-| Пережить повторное открытие БД, повторить выдачу | SQLite, lease/token | test_restart_and_expired_lease |
-| 12 заданий не выдать одновременно дважды | BEGIN IMMEDIATE | test_concurrent_claims (6 потоков) |
+| 202, job_id, queued and done | api.py, broker.py, consumer.py | test_http_workflow_and_validation |
+| Errors 400/404/413 | api.py | test_http_workflow_and_validation |
+| FIFO and acknowledgement after processing | JobStore.claim/complete | test_fifo_and_ack |
+| Database reopening and claim recovery | SQLite, lease/token | test_restart_and_expired_lease |
+| No simultaneous duplicate claims for 12 jobs | BEGIN IMMEDIATE | test_concurrent_claims (six threads) |
 
-Измеримые параметры: максимум 1000 символов и 64 KiB тела; lease 30 секунд; worker delay 3 секунды; polling 1 секунда; HTTP timeout producer 5 секунд. Они не являются гарантией задержки под произвольной нагрузкой. Проверки выполняются командой python -m unittest -v; фактический результат сохранён в test-results.txt.
+Measurable parameters: at most 1000 message characters and 64 KiB per request body; a 30-second lease; a three-second worker delay; one-second polling; and a five-second producer HTTP timeout. These are not latency guarantees under arbitrary load. Run python -m unittest -v; actual results are recorded in test-results.txt.

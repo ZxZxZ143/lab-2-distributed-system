@@ -1,42 +1,43 @@
-# Lab 2 — REST API и надёжная локальная очередь
+# Lab 2 — REST API and a Durable Local Queue
 
-Исправленная лабораторная Kurlykov Yevgeniy. Клиент отправляет текст, API создаёт задание и сразу возвращает HTTP 202 с job_id. Отдельный worker переводит текст в верхний регистр. Клиент наблюдает queued -> processing -> done и получает результат.
+Revised laboratory work by Kurlykov Yevgeniy. A client submits text, and the API immediately returns HTTP 202 with a job_id. A separate worker converts the text to uppercase. The client observes queued -> processing -> done and retrieves the result.
 
-## Запуск
-Требуется Python 3.9+. Сторонних зависимостей нет; requirements.txt явно фиксирует это.
+## Running the application
+
+Python 3.9+ is required. There are no third-party runtime dependencies; requirements.txt explicitly documents this.
 
 ```bash
 python -m pip install -r requirements.txt
 python api.py
 ```
 
-В другом терминале, из того же каталога:
+In another terminal, from the same directory:
 
 ```bash
 python consumer.py
 ```
 
-В третьем терминале:
+In a third terminal:
 
 ```bash
 python producer.py "Hello distributed systems"
 ```
 
-Для демонстрации queued сначала отправьте задание без worker, затем запустите worker. Producer выводит HTTP-коды и ответы. API: http://127.0.0.1:5000. GET /time и POST /echo также доступны. Ctrl+C останавливает процессы; jobs.sqlite3 сохраняется. Параметр --db у API и worker должен указывать на один файл. broker.py — модуль SQLite, его не нужно запускать отдельным сервером.
+To demonstrate queued, submit a job before starting the worker, then start the worker. The producer prints HTTP status codes and responses. The API is available at http://127.0.0.1:5000. GET /time and POST /echo are also supported. Ctrl+C stops the processes; jobs.sqlite3 is retained. The API and worker must use the same --db path. broker.py is the SQLite storage module and does not run as a separate server.
 
-## Проверки и материалы
+## Tests and supporting materials
 
 ```bash
 python -m unittest -v
 ```
 
-- [spec.md](spec.md): контракты, риски, параметры, соответствие требованиям.
-- [Lab2_Report.pdf](Lab2_Report.pdf): актуальный отчёт.
-- [test-results.txt](test-results.txt): фактический запуск автоматических проверок, включая HTTP.
-- [DEFENSE.md](DEFENSE.md): пояснения для индивидуальной защиты.
-- [GIT_HISTORY.md](GIT_HISTORY.md): исходная история и команда проверки.
-- screenshots/: исходные изображения старой реализации; они не подтверждают новый /jobs workflow.
+- [spec.md](spec.md): contracts, risks, parameters and requirement traceability.
+- [Lab2_Report.pdf](Lab2_Report.pdf): current report.
+- [test-results.txt](test-results.txt): actual automated test output, including HTTP requests.
+- [DEFENSE.md](DEFENSE.md): preparation for the individual defence.
+- [GIT_HISTORY.md](GIT_HISTORY.md): original history and verification command.
+- screenshots/: original images from the previous implementation; they do not demonstrate the new /jobs workflow.
 
-Реализация изменена по существу: очередь в SQLite, транзакционная выдача, lease и ack после обработки. Функциональность старого /queue/orders заменена /jobs. Для новой сдачи приложите актуальные материалы и покажите живой запуск; старые скриншоты не выдавайте за новые.
+The revision introduces substantive changes: SQLite persistence, transactional claims, leases and acknowledgement after processing. The former /queue/orders interface is replaced by /jobs. Submit the current materials and demonstrate a live run; do not present old screenshots as evidence of the revised implementation.
 
-Сервис учебный и локальный. Повторная обработка возможна; для внешних действий нужна идемпотентность. Нет авторизации, TLS, распределённого хранилища и гарантии exactly-once.
+This is a local educational service. Processing may be repeated; external side effects require idempotency. Authentication, TLS, distributed storage and exactly-once execution are not provided.
