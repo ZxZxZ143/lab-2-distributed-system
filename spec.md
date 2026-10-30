@@ -1,35 +1,45 @@
-# Lab 2 - REST API and Message Queue Specification
+# Lab 2 — спецификация исправленной реализации
 
-## 1. System Overview
+## Назначение и границы
+Локальная асинхронная обработка текстовых заданий. HTTP API принимает задание, отдельный worker преобразует сообщение в верхний регистр. SQLite хранит очередь, результат и статус. API и worker — разные процессы на одном компьютере с одним файлом базы. Python 3.9+, стандартная библиотека; AWS/SQS и внешние зависимости не используются.
 
-The system consists of two Flask HTTP services: a REST API on port 5000 and an in-memory message broker on port 6000. A producer sends orders to the broker, while a consumer retrieves and processes them independently.
+## Контракт
+| Запрос | Вход | Выход / код |
+|---|---|---|
+| GET /time | нет | 200, server_time: строка UTC ISO 8601 |
+| POST /echo | объект с message | 200, message: исходная строка |
+| POST /jobs | объект с message | 202, job_id: UUID-строка, status: queued; Location: /jobs/{job_id} |
+| GET /jobs/{job_id} | UUID в пути | 200, job_id, status, attempts: целое, result: null или объект с message |
+| GET /jobs/{неизвестный-id} | неизвестный ID | 404, error |
 
-## 2. Functional Requirements
+message — непустая после strip строка, максимум 1000 символов; исходные пробелы сохраняются. Необязательные дополнительные поля игнорируются. JSON должен быть объектом; неверный JSON, тип или message дают 400. Тело ограничено 65536 байтами (413 при превышении). Неизвестный маршрут — 404. Старый /queue/orders заменён контрактом /jobs.
 
-| Endpoint | Method | Input | Output | HTTP Status |
-|---|---|---|---|---|
-| `/time` | GET | None | `{"server_time": "string"}` | 200 |
-| `/echo` | POST | `{"message": "string"}` | `{"message": "string"}` | 200 |
-| `/echo` | POST | Missing `message` | `{"error": "field 'message' is required"}` | 400 |
-| `/queue/<topic>` | POST | JSON object | `{"status": "queued", "topic": "string"}` | 201 |
-| `/queue/<topic>` | GET | Topic in URL | Original JSON message | 200 |
-| `/queue/<topic>` | GET | Empty queue | No response body | 204 |
+## Очередь и подтверждение
+Запись: seq (возрастающий порядок), job_id (уникальный UUID), payload (JSON с message), status, result, lease_until (Unix timestamp), token (UUID текущей выдачи), attempts (счётчик выдач). Состояния: queued -> processing -> done. Просроченное processing можно повторно выдать с новым token.
 
-Messages are processed in FIFO order. The producer submits an order approximately every 1 second. The consumer simulates processing each order for 3 seconds and polls again after 2 seconds when the queue is empty.
+Выдача выполняется транзакцией BEGIN IMMEDIATE: выбирается самая ранняя доступная запись и резервируется на 30 секунд. Запись не удаляется. Подтверждение принимается только для действующего token до истечения lease. done фиксируется вместе с результатом. Обработка занимает 3 секунды, ожидание пустой очереди — 1 секунду. При сбое worker другой запуск сможет забрать задание после окончания lease.
 
-## 3. Constraints and Non-Functional Requirements
+FIFO относится к порядку выдачи доступных заданий. Несколько worker могут завершать задания в другом порядке. Семантика — повторная обработка возможна (at-least-once при перезапусках worker); exactly-once для внешних действий не обещается. Преобразование текста детерминировано и не имеет внешних побочных эффектов.
 
-- **Protocol:** HTTP with JSON payloads.
-- **Environment:** Python 3.9+, Flask, requests; local machine.
-- **Performance target:** API responses should complete within 1 second under a local test workload of up to 10 sequential requests.
-- **Reliability:** Messages remain queued when the consumer is offline, provided the broker stays running.
-- **Storage:** In-memory only; messages are lost when the broker restarts.
-- **Security:** Intended for local testing on a trusted machine or network. No authentication or encryption is implemented.
+## Ограничения, допущения и риски
+| Допущение / ограничение | Последствие и мера |
+|---|---|
+| Один компьютер, один путь SQLite | Разные пути создадут независимые очереди; запускать из одного каталога или передавать одинаковый --db |
+| Локальная файловая система исправна | Перезапуск не удаляет данные; удаление/повреждение файла ведёт к потере; резервное копирование вне задания |
+| Обработка короче 30 секунд | Долгая обработка теряет lease; token блокирует устаревший ack; для долгих задач нужен heartbeat |
+| Возможна повторная обработка | Внешние платежи/письма потребуют идемпотентности по job_id |
+| Нет авторизации/TLS | API привязан к 127.0.0.1; не публиковать в интернет |
+| Один SQLite writer | Подходит для учебной нагрузки, не для распределённого кластера; ожидание блокировки ограничено 10 секундами |
+| Нет удаления done-записей | База растёт; политика очистки вне текущего прототипа |
+| Нет бесконечного ожидания клиента | Producer прекращает опрос через 60 секунд, само задание остаётся в базе |
 
-## 4. Assumptions
+## Проверяемые требования и прослеживаемость
+| Требование | Реализация | Проверка |
+|---|---|---|
+| 202, job_id, queued и done | api.py, broker.py, consumer.py | test_http_workflow_and_validation |
+| Ошибки 400/404/413 | api.py | test_http_workflow_and_validation |
+| FIFO, ack после обработки | JobStore.claim/complete | test_fifo_and_ack |
+| Пережить повторное открытие БД, повторить выдачу | SQLite, lease/token | test_restart_and_expired_lease |
+| 12 заданий не выдать одновременно дважды | BEGIN IMMEDIATE | test_concurrent_claims (6 потоков) |
 
-- The producer, consumer and broker run on the same computer using localhost.
-- Clients send valid JSON objects; the broker does not enforce a strict message schema.
-- Only one broker process is used; queues are not shared across multiple processes.
-- The system is a learning prototype, not a production messaging platform.
-- The consumer handles one order at a time. A message is removed from the queue when retrieved, without acknowledgement or automatic redelivery.
+Измеримые параметры: максимум 1000 символов и 64 KiB тела; lease 30 секунд; worker delay 3 секунды; polling 1 секунда; HTTP timeout producer 5 секунд. Они не являются гарантией задержки под произвольной нагрузкой. Проверки выполняются командой python -m unittest -v; фактический результат сохранён в test-results.txt.

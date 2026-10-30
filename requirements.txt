@@ -1,0 +1,2 @@
+# Python >=3.9. Runtime and tests use only the standard library.
+# No third-party packages are required.
